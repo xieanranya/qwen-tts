@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Qwen3-TTS 小说朗读引擎</title>
+</head>
+<body></body>
+
+<script>
+var isCookieJar = true;
+
+class FlutterJSBridge {
+  constructor() { this.init(); }
+
+  init() {
+    if (window.flutter_inappwebview) {
+      this.isReady = true;
+      this.CookieJar();
+    } else {
+      window.addEventListener('flutterInAppWebViewPlatformReady', () => {
+        this.isReady = true;
+        this.CookieJar();
+      });
+    }
+  }
+
+  async CookieJar() {
+    try {
+      await window.flutter_inappwebview.callHandler('CookieJar', isCookieJar);
+    } catch (e) {}
+  }
+
+  async log(str) {
+    try { return await window.flutter_inappwebview.callHandler('log', str); }
+    catch (e) { return false; }
+  }
+
+  async showToast(str) {
+    try { return await window.flutter_inappwebview.callHandler('showToast', str); }
+    catch (e) { return false; }
+  }
+}
+
+class Http {
+  async Get(url, headers, followRedirects) {
+    try {
+      return await window.flutter_inappwebview.callHandler(
+        'http', 'get', url, '', JSON.stringify(headers || {}),
+        followRedirects, ''
+      );
+    } catch (e) { return null; }
+  }
+
+  async Post(url, headers, body, contenttype, followRedirects) {
+    try {
+      return await window.flutter_inappwebview.callHandler(
+        'http', 'post', url, body, JSON.stringify(headers || {}),
+        followRedirects, contenttype
+      );
+    } catch (e) { return null; }
+  }
+}
+
+class Cache {
+  async get(key) {
+    try { return await window.flutter_inappwebview.callHandler('cache.get', key); }
+    catch (e) { return null; }
+  }
+
+  async set(key, value) {
+    try { return await window.flutter_inappwebview.callHandler('cache.set', key, value); }
+    catch (e) { return null; }
+  }
+
+  async getLoginInfo() {
+    return await this.get("LoginInfo");
+  }
+
+  async putLoginInfo(info) {
+    return await this.set("LoginInfo", info);
+  }
+}
+
+const flutterBridge = new FlutterJSBridge();
+const http = new Http();
+const cache = new Cache();
+
+/*
+ * Qwen3-TTS 小说朗读引擎
+ *
+ * 本引擎不保存你的 API Key 到代码中。
+ * API Key 通过“登录/配置”弹窗输入，并由软件自己的 Cache 保存。
+ *
+ * 支持：
+ * - qwen3-tts-flash
+ * - 北京地域 / 新加坡地域
+ * - Cherry / Serena / Ethan / Moon / Maia / Kai
+ */
+
+async function getConfig() {
+  let info = await cache.getLoginInfo();
+  try {
+    let cfg = JSON.parse(info || "{}");
+    return cfg || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+async function getttsurl(speakText, speechRate) {
+  const cfg = await getConfig();
+
+  if (!cfg["API密钥"]) {
+    await flutterBridge.showToast("请先在朗读引擎的登录/配置中填写 Qwen API Key");
+    return JSON.stringify({
+      "method": "data",
+      "url": "",
+      "headers": {},
+      "body": ""
+    });
+  }
+
+  const region = cfg["地域"] || "北京";
+  const voice = cfg["音色"] || "Cherry";
+  const model = cfg["模型"] || "qwen3-tts-flash";
+
+  const apiUrl = region === "新加坡"
+    ? "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+    : "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+
+  const body = {
+    "model": model,
+    "input": {
+      "text": String(speakText || ""),
+      "voice": voice,
+      "language_type": "Chinese"
+    }
+  };
+
+  /*
+   * qwen3-tts-flash 的非流式 API 返回一个完整音频 URL。
+   * 软件自己的 Http.Get 会把音频原始字节放进 body（Base64），
+   * 再用 method=data 交给朗读播放器。
+   */
+  const response = await http.Post(
+    apiUrl,
+    {
+      "Authorization": "Bearer " + cfg["API密钥"],
+      "Content-Type": "application/json"
+    },
+    JSON.stringify(body),
+    "application/json",
+    true
+  );
+
+  if (!response || !response.data) {
+    await flutterBridge.showToast("Qwen API 没有返回数据");
+    return JSON.stringify({"method":"data","url":"","headers":{},"body":""});
+  }
+
+  try {
+    const result = JSON.parse(response.data);
+
+    if (result.status_code && result.status_code !== 200) {
+      const msg = result.message || result.code || ("HTTP " + result.status_code);
+      await flutterBridge.showToast("Qwen 请求失败：" + msg);
+      return JSON.stringify({"method":"data","url":"","headers":{},"body":""});
+    }
+
+    const audio = result.output && result.output.audio;
+
+    // 某些返回会直接给 Base64 音频
+    if (audio && audio.data) {
+      return JSON.stringify({
+        "method": "data",
+        "url": "",
+        "headers": {},
+        "body": audio.data
+      });
+    }
+
+    // qwen3-tts-flash 非流式通常返回完整音频 URL
+    if (audio && audio.url) {
+      const audioResponse = await http.Get(audio.url, {}, true);
+      if (audioResponse && audioResponse.body) {
+        return JSON.stringify({
+          "method": "data",
+          "url": "",
+          "headers": {},
+          "body": audioResponse.body
+        });
+      }
+    }
+
+    await flutterBridge.showToast("Qwen 没有返回可播放的音频");
+  } catch (e) {
+    await flutterBridge.log("Qwen TTS 解析错误: " + e);
+    await flutterBridge.showToast("Qwen 返回数据解析失败");
+  }
+
+  return JSON.stringify({"method":"data","url":"","headers":{},"body":""});
+}
+
+async function getloginurl() {
+  const cfg = await getConfig();
+
+  return JSON.stringify([
+    {"name":"API密钥","type":"password"},
+    {"name":"北京地域","type":"button","action":"setRegion('北京')","style":{"layout_flexBasisPercent":0.5}},
+    {"name":"新加坡地域","type":"button","action":"setRegion('新加坡')","style":{"layout_flexBasisPercent":0.5}},
+
+    {"name":"Cherry（女）","type":"button","action":"setVoice('Cherry')","style":{"layout_flexBasisPercent":0.333}},
+    {"name":"Serena（女）","type":"button","action":"setVoice('Serena')","style":{"layout_flexBasisPercent":0.333}},
+    {"name":"Ethan（男）","type":"button","action":"setVoice('Ethan')","style":{"layout_flexBasisPercent":0.333}},
+    {"name":"Moon（男）","type":"button","action":"setVoice('Moon')","style":{"layout_flexBasisPercent":0.333}},
+    {"name":"Maia（女）","type":"button","action":"setVoice('Maia')","style":{"layout_flexBasisPercent":0.333}},
+    {"name":"Kai（男）","type":"button","action":"setVoice('Kai')","style":{"layout_flexBasisPercent":0.333}},
+
+    {"name":"当前设置","type":"text"}
+  ]);
+}
+
+async function setRegion(v) {
+  const cfg = await getConfig();
+  cfg["地域"] = v;
+  await cache.putLoginInfo(JSON.stringify(cfg));
+  await flutterBridge.showToast("已选择：" + v + "地域");
+}
+
+async function setVoice(v) {
+  const cfg = await getConfig();
+  cfg["音色"] = v;
+  await cache.putLoginInfo(JSON.stringify(cfg));
+  await flutterBridge.showToast("已选择音色：" + v);
+}
+
+async function login() {}
+</script>
+</html>
