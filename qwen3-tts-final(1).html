@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Qwen3-TTS</title>
+</head>
+<body>
+</body>
+
+<script>
+var isCookieJar = true;
+
+class FlutterJSBridge {
+  constructor() {
+    this.init();
+  }
+
+  init() {
+    if (window.flutter_inappwebview) {
+      this.isReady = true;
+      this.CookieJar();
+    } else {
+      window.addEventListener('flutterInAppWebViewPlatformReady', () => {
+        this.isReady = true;
+        this.CookieJar();
+      });
+    }
+  }
+
+  async CookieJar() {
+    try {
+      await window.flutter_inappwebview.callHandler('CookieJar', isCookieJar);
+    } catch (error) {}
+  }
+
+  async log(str) {
+    try {
+      return await window.flutter_inappwebview.callHandler('log', str);
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async showToast(str) {
+    try {
+      return await window.flutter_inappwebview.callHandler('showToast', str);
+    } catch (error) {
+      return false;
+    }
+  }
+}
+
+class Http {
+  constructor() {}
+
+  async Get(url, headers, followRedirects) {
+    try {
+      return await window.flutter_inappwebview.callHandler(
+        'http', 'get', url, '', JSON.stringify(headers), followRedirects, ''
+      );
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async Post(url, headers, body, contenttype, followRedirects) {
+    try {
+      return await window.flutter_inappwebview.callHandler(
+        'http', 'post', url, body, JSON.stringify(headers), followRedirects, contenttype
+      );
+    } catch (error) {
+      return null;
+    }
+  }
+}
+
+class Cache {
+  constructor() {}
+
+  async get(key) {
+    try {
+      return await window.flutter_inappwebview.callHandler('cache.get', key);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async set(key, value) {
+    try {
+      return await window.flutter_inappwebview.callHandler('cache.set', key, value);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async getLoginInfo() {
+    return await this.get("LoginInfo");
+  }
+
+  async putLoginInfo(info) {
+    return await this.set("LoginInfo", info);
+  }
+}
+
+const flutterBridge = new FlutterJSBridge();
+const cache = new Cache();
+const http = new Http();
+
+/*
+ * Qwen3-TTS-Flash
+ * 轻悦时光自定义朗读引擎
+ */
+
+async function getApiKey() {
+  try {
+    var info = await cache.getLoginInfo();
+    if (!info) return "";
+    var obj = JSON.parse(info);
+    return obj["Qwen API Key"] || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+async function getRegion() {
+  try {
+    var info = await cache.getLoginInfo();
+    if (!info) return "北京";
+    var obj = JSON.parse(info);
+    return obj["地域"] || "北京";
+  } catch (e) {
+    return "北京";
+  }
+}
+
+async function getVoice() {
+  try {
+    var v = await cache.get("qwen_voice");
+    return v || "Cherry";
+  } catch (e) {
+    return "Cherry";
+  }
+}
+
+/*
+ * 轻悦时光要求这里返回：
+ * {
+ *   method: "get",
+ *   url: "音频地址",
+ *   headers: {},
+ *   body: ""
+ * }
+ *
+ * Qwen3-TTS-Flash 非流式接口会在 output.audio.url
+ * 返回一个可直接下载/播放的音频 URL。
+ */
+async function getttsurl(speakText, speechRate) {
+  var apiKey = await getApiKey();
+
+  if (!apiKey) {
+    await flutterBridge.showToast("请先填写 Qwen API Key");
+    return JSON.stringify({
+      "method": "get",
+      "url": "",
+      "headers": {},
+      "body": ""
+    });
+  }
+
+  var region = await getRegion();
+
+  var apiUrl =
+    region === "新加坡"
+      ? "https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+      : "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+
+  var body = {
+    "model": "qwen3-tts-flash",
+    "input": {
+      "text": String(speakText || ""),
+      "voice": await getVoice(),
+      "language_type": "Chinese"
+    }
+  };
+
+  try {
+    var re = await http.Post(
+      apiUrl,
+      {
+        "Authorization": "Bearer " + apiKey,
+        "Content-Type": "application/json"
+      },
+      JSON.stringify(body),
+      "application/json",
+      true
+    );
+
+    if (!re) {
+      await flutterBridge.showToast("Qwen 请求没有返回");
+      return JSON.stringify({"method":"get","url":"","headers":{},"body":""});
+    }
+
+    if (re.statusCode && re.statusCode !== 200) {
+      await flutterBridge.log("Qwen HTTP " + re.statusCode + ": " + (re.data || ""));
+      await flutterBridge.showToast("Qwen 请求失败：" + re.statusCode);
+      return JSON.stringify({"method":"get","url":"","headers":{},"body":""});
+    }
+
+    var data = JSON.parse(re.data || "{}");
+
+    if (data.output && data.output.audio && data.output.audio.url) {
+      return JSON.stringify({
+        "method": "get",
+        "url": data.output.audio.url,
+        "headers": {},
+        "body": ""
+      });
+    }
+
+    var msg = data.message || data.code || "没有返回音频地址";
+    await flutterBridge.log("Qwen 返回异常：" + (re.data || ""));
+    await flutterBridge.showToast("Qwen：" + msg);
+
+  } catch (e) {
+    await flutterBridge.log("Qwen TTS 错误：" + e);
+    await flutterBridge.showToast("Qwen TTS 请求失败");
+  }
+
+  return JSON.stringify({
+    "method": "get",
+    "url": "",
+    "headers": {},
+    "body": ""
+  });
+}
+
+/*
+ * 登录/配置弹窗
+ */
+async function getloginurl() {
+  var UI = [
+    {
+      "name": "Qwen API Key",
+      "type": "password"
+    },
+    {
+      "name": "北京地域",
+      "type": "button",
+      "action": "setRegion('北京')",
+      "style": {
+        "layout_flexBasisPercent": 0.5
+      }
+    },
+    {
+      "name": "新加坡地域",
+      "type": "button",
+      "action": "setRegion('新加坡')",
+      "style": {
+        "layout_flexBasisPercent": 0.5
+      }
+    },
+    {
+      "name": "Cherry（女声）",
+      "type": "button",
+      "action": "setVoice('Cherry')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Serena（女声）",
+      "type": "button",
+      "action": "setVoice('Serena')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Ethan（男声）",
+      "type": "button",
+      "action": "setVoice('Ethan')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Moon（男声）",
+      "type": "button",
+      "action": "setVoice('Moon')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Maia（女声）",
+      "type": "button",
+      "action": "setVoice('Maia')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Kai（男声）",
+      "type": "button",
+      "action": "setVoice('Kai')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Nofish（男声）",
+      "type": "button",
+      "action": "setVoice('Nofish')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    },
+    {
+      "name": "Momo（女声）",
+      "type": "button",
+      "action": "setVoice('Momo')",
+      "style": {
+        "layout_flexBasisPercent": 0.25
+      }
+    }
+  ];
+
+  return JSON.stringify(UI);
+}
+
+async function setRegion(v) {
+  try {
+    var info = await cache.getLoginInfo();
+    var obj = {};
+    if (info) obj = JSON.parse(info);
+    obj["地域"] = v;
+    await cache.putLoginInfo(JSON.stringify(obj));
+    await flutterBridge.showToast("已选择：" + v + "地域");
+  } catch (e) {}
+}
+
+async function setVoice(v) {
+  await cache.set("qwen_voice", v);
+  await flutterBridge.showToast("已切换音色：" + v);
+}
+
+async function login() {}
+</script>
+</html>
